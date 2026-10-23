@@ -1,13 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
-import {
-  isValidJoinCode,
-  normalizeJoinCode,
-  relayCreateRoom,
-  relayFetchOffer,
-  relayPostAnswer,
-  relayWaitForAnswer,
-} from './lib/relay'
+import { inviteLink, readInviteFromLocation } from './lib/signal'
 import { WispSession, type SessionPhase } from './lib/session'
 
 type Screen = 'home' | 'host' | 'join' | 'chat'
@@ -22,7 +15,7 @@ type ChatLine = {
 function phaseLabel(phase: SessionPhase): string {
   switch (phase) {
     case 'signaling':
-      return 'Setting up…'
+      return 'Waiting for handshake…'
     case 'connecting':
       return 'Connecting…'
     case 'open':
@@ -39,13 +32,14 @@ function phaseLabel(phase: SessionPhase): string {
 export default function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [phase, setPhase] = useState<SessionPhase>('new')
-  const [roomCode, setRoomCode] = useState('')
-  const [joinCode, setJoinCode] = useState('')
+  const [inviteToken, setInviteToken] = useState('')
+  const [inviteUrl, setInviteUrl] = useState('')
+  const [pasteInvite, setPasteInvite] = useState('')
+  const [pasteAnswer, setPasteAnswer] = useState('')
+  const [answerToken, setAnswerToken] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [lines, setLines] = useState<ChatLine[]>([])
   const [draft, setDraft] = useState('')
-  const [waitingForGuest, setWaitingForGuest] = useState(false)
-  const [joining, setJoining] = useState(false)
 
   const sessionRef = useRef<WispSession | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -54,10 +48,7 @@ export default function App() {
     () => ({
       onPhase: (p: SessionPhase) => {
         setPhase(p)
-        if (p === 'open') {
-          setWaitingForGuest(false)
-          setScreen('chat')
-        }
+        if (p === 'open') setScreen('chat')
       },
       onMessage: (body: string, at: number) => {
         setLines((prev) => [
@@ -68,6 +59,14 @@ export default function App() {
     }),
     [],
   )
+
+  useEffect(() => {
+    const fromUrl = readInviteFromLocation()
+    if (fromUrl) {
+      setPasteInvite(fromUrl)
+      setScreen('join')
+    }
+  }, [])
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
@@ -87,54 +86,53 @@ export default function App() {
     sessionRef.current = null
     setScreen('home')
     setPhase('new')
-    setRoomCode('')
-    setJoinCode('')
+    setInviteToken('')
+    setInviteUrl('')
+    setPasteInvite('')
+    setPasteAnswer('')
+    setAnswerToken('')
     setError(null)
     setLines([])
     setDraft('')
-    setWaitingForGuest(false)
-    setJoining(false)
+    if (window.location.hash) {
+      history.replaceState(null, '', window.location.pathname)
+    }
   }
 
   const startHost = async () => {
     setError(null)
-    setWaitingForGuest(true)
-    setScreen('host')
-    let code = ''
     try {
-      const { session, offerSdp } = await WispSession.startHost(handlers())
+      const { session, inviteToken: token } = await WispSession.startHost(handlers())
       sessionRef.current = session
-      code = await relayCreateRoom(offerSdp)
-      setRoomCode(code)
-      const answerSdp = await relayWaitForAnswer(code)
-      await session.applyAnswerSdp(answerSdp)
+      setInviteToken(token)
+      setInviteUrl(inviteLink(token))
+      setScreen('host')
     } catch (e) {
-      setWaitingForGuest(false)
-      sessionRef.current?.close()
-      sessionRef.current = null
       setError(e instanceof Error ? e.message : 'Could not start session.')
-      setScreen(code ? 'host' : 'home')
     }
   }
 
-  const joinWithCode = async () => {
-    const code = normalizeJoinCode(joinCode)
-    if (!isValidJoinCode(code)) {
-      setError('Enter the 6-digit code from your friend.')
-      return
-    }
+  const completeHost = async () => {
+    if (!sessionRef.current || !pasteAnswer.trim()) return
     setError(null)
-    setJoining(true)
     try {
-      const offerSdp = await relayFetchOffer(code)
-      const { session, answerSdp } = await WispSession.joinGuestWithOffer(
-        offerSdp,
+      await sessionRef.current.applyAnswer(pasteAnswer.trim())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Invalid answer code.')
+    }
+  }
+
+  const joinAsGuest = async () => {
+    if (!pasteInvite.trim()) return
+    setError(null)
+    try {
+      const { session, answerToken: ans } = await WispSession.joinGuest(
+        pasteInvite.trim(),
         handlers(),
       )
       sessionRef.current = session
-      await relayPostAnswer(code, answerSdp)
+      setAnswerToken(ans)
     } catch (e) {
-      setJoining(false)
       setError(e instanceof Error ? e.message : 'Could not join.')
     }
   }
@@ -150,15 +148,13 @@ export default function App() {
     setDraft('')
   }
 
-  const copyCode = async (code: string) => {
+  const copy = async (value: string) => {
     try {
-      await navigator.clipboard.writeText(code)
+      await navigator.clipboard.writeText(value)
     } catch {
       /* clipboard may be blocked */
     }
   }
-
-  const joinDigits = normalizeJoinCode(joinCode)
 
   return (
     <div className="app">
@@ -185,7 +181,7 @@ export default function App() {
       {screen === 'home' && (
         <main className="panel home">
           <p className="lede">
-            Peer-to-peer text chat. Share a 6-digit code, talk, then close the tab — nothing is saved.
+            Peer-to-peer text chat. No server, no accounts, no history — refresh and it&apos;s gone.
           </p>
           <div className="actions">
             <button type="button" className="primary" onClick={startHost}>
@@ -196,11 +192,10 @@ export default function App() {
               className="secondary"
               onClick={() => {
                 setScreen('join')
-                setJoining(false)
                 setError(null)
               }}
             >
-              Join with code
+              Join with invite
             </button>
           </div>
         </main>
@@ -208,47 +203,57 @@ export default function App() {
 
       {screen === 'host' && (
         <main className="panel stack">
-          <section className="code-card">
-            <h2>Your code</h2>
-            <p className="hint">Tell your friend this number. It expires in about 15 minutes.</p>
-            <p className="room-code" aria-label={`Room code ${roomCode}`}>
-              {roomCode || '······'}
-            </p>
-            {roomCode && (
-              <button type="button" onClick={() => copyCode(roomCode)}>Copy code</button>
-            )}
-            {waitingForGuest && (
-              <p className="hint wait">Waiting for them to enter the code…</p>
-            )}
+          <section>
+            <h2>1 — Send this link</h2>
+            <p className="hint">Your friend opens it in their browser. Nothing is stored on a server.</p>
+            <textarea readOnly value={inviteUrl} rows={3} />
+            <div className="row">
+              <button type="button" onClick={() => copy(inviteUrl)}>Copy link</button>
+              <button type="button" onClick={() => copy(inviteToken)}>Copy invite code</button>
+            </div>
+          </section>
+          <section>
+            <h2>2 — Paste their answer</h2>
+            <p className="hint">After they join, they get a code — paste it here to connect.</p>
+            <textarea
+              value={pasteAnswer}
+              onChange={(e) => setPasteAnswer(e.target.value)}
+              placeholder="Answer code…"
+              rows={4}
+            />
+            <button type="button" className="primary" onClick={completeHost}>
+              Connect
+            </button>
           </section>
         </main>
       )}
 
-      {screen === 'join' && phase !== 'open' && (
+      {screen === 'join' && !answerToken && (
         <main className="panel stack">
-          {joining ? (
-            <section>
-              <h2>Joining…</h2>
-              <p className="hint">Connecting peer-to-peer. This usually takes a few seconds.</p>
-            </section>
-          ) : (
-            <section>
-              <h2>Join hey</h2>
-              <p className="hint">Enter the 6-digit code your friend gave you.</p>
-              <input
-                className="code-input"
-                value={joinDigits}
-                onChange={(e) => setJoinCode(e.target.value)}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                placeholder="000000"
-                maxLength={6}
-              />
-              <button type="button" className="primary" onClick={joinWithCode}>
-                Join
-              </button>
-            </section>
-          )}
+          <section>
+            <h2>Join hey</h2>
+            <p className="hint">Paste the invite link or code from your friend.</p>
+            <textarea
+              value={pasteInvite}
+              onChange={(e) => setPasteInvite(e.target.value)}
+              placeholder="Invite link or code…"
+              rows={4}
+            />
+            <button type="button" className="primary" onClick={joinAsGuest}>
+              Join
+            </button>
+          </section>
+        </main>
+      )}
+
+      {screen === 'join' && answerToken && phase !== 'open' && (
+        <main className="panel stack">
+          <section>
+            <h2>Send this back to your friend</h2>
+            <p className="hint">Copy the code — they paste it to finish connecting.</p>
+            <textarea readOnly value={answerToken} rows={4} />
+            <button type="button" onClick={() => copy(answerToken)}>Copy answer code</button>
+          </section>
         </main>
       )}
 
@@ -284,7 +289,7 @@ export default function App() {
       )}
 
       <footer className="foot">
-        WebRTC text only · Messages stay peer-to-peer · Close the tab to disappear
+        WebRTC text only · No backend · Close the tab to disappear
       </footer>
     </div>
   )

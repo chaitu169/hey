@@ -1,3 +1,5 @@
+import { decodeSignal, encodeSignal, type SignalBundle } from './signal'
+
 const ICE: RTCConfiguration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 }
@@ -69,9 +71,7 @@ export class WispSession {
     })
   }
 
-  private static async createOfferSession(
-    handlers: SessionHandlers,
-  ): Promise<{ session: WispSession; offerSdp: string }> {
+  static async startHost(handlers: SessionHandlers): Promise<{ session: WispSession; inviteToken: string }> {
     const pc = new RTCPeerConnection(ICE)
     const session = new WispSession(pc, handlers)
     handlers.onPhase('signaling')
@@ -84,19 +84,22 @@ export class WispSession {
     await pc.setLocalDescription(offer)
     await waitForIceGathering(pc)
 
-    const offerSdp = pc.localDescription?.sdp
-    if (!offerSdp) throw new Error('Could not build connection offer.')
-    return { session, offerSdp }
+    const sdp = pc.localDescription?.sdp
+    if (!sdp) throw new Error('Could not build connection offer.')
+
+    const bundle: SignalBundle = { v: 1, kind: 'offer', sdp }
+    return { session, inviteToken: encodeSignal(bundle) }
   }
 
-  static async startHost(handlers: SessionHandlers): Promise<{ session: WispSession; offerSdp: string }> {
-    return WispSession.createOfferSession(handlers)
-  }
-
-  static async joinGuestWithOffer(
-    offerSdp: string,
+  static async joinGuest(
+    inviteToken: string,
     handlers: SessionHandlers,
-  ): Promise<{ session: WispSession; answerSdp: string }> {
+  ): Promise<{ session: WispSession; answerToken: string }> {
+    const offerBundle = decodeSignal(inviteToken)
+    if (offerBundle.kind !== 'offer') {
+      throw new Error('Expected a host invite, not an answer code.')
+    }
+
     const pc = new RTCPeerConnection(ICE)
     const session = new WispSession(pc, handlers)
     handlers.onPhase('signaling')
@@ -106,19 +109,25 @@ export class WispSession {
       wireDataChannel(ev.channel, handlers, () => {})
     })
 
-    await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp })
+    await pc.setRemoteDescription({ type: 'offer', sdp: offerBundle.sdp })
     const answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
     await waitForIceGathering(pc)
 
-    const answerSdp = pc.localDescription?.sdp
-    if (!answerSdp) throw new Error('Could not build connection answer.')
-    return { session, answerSdp }
+    const sdp = pc.localDescription?.sdp
+    if (!sdp) throw new Error('Could not build connection answer.')
+
+    const bundle: SignalBundle = { v: 1, kind: 'answer', sdp }
+    return { session, answerToken: encodeSignal(bundle) }
   }
 
-  async applyAnswerSdp(answerSdp: string): Promise<void> {
+  async applyAnswer(answerToken: string): Promise<void> {
+    const answerBundle = decodeSignal(answerToken)
+    if (answerBundle.kind !== 'answer') {
+      throw new Error('Expected an answer code from your guest.')
+    }
     this.handlers.onPhase('connecting')
-    await this.pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+    await this.pc.setRemoteDescription({ type: 'answer', sdp: answerBundle.sdp })
   }
 
   send(text: string): void {
