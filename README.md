@@ -1,4 +1,4 @@
-# hey
+# hush
 
 **Text that vanishes** — static, peer-to-peer text chat. No chat backend, no accounts, no message storage.
 

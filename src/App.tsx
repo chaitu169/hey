@@ -162,7 +162,7 @@ export default function App() {
         <div className="brand">
           <span className="mark" aria-hidden>◇</span>
           <div>
-            <h1>hey</h1>
+            <h1>hush</h1>
             <p>Text that vanishes</p>
           </div>
         </div>
@@ -231,7 +231,7 @@ export default function App() {
       {screen === 'join' && !answerToken && (
         <main className="panel stack">
           <section>
-            <h2>Join hey</h2>
+              <h2>Join hush</h2>
             <p className="hint">Paste the invite link or code from your friend.</p>
             <textarea
               value={pasteInvite}
